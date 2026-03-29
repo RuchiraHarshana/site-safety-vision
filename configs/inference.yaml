@@ -1,0 +1,21 @@
+model:
+  model_path: models/best.pt
+  confidence_threshold: 0.25
+  device: null
+  image_size: 640
+  tracker: bytetrack.yaml
+
+rules:
+  required_missing_frames: 5
+  recent_memory_frames: 15
+
+matcher:
+  helmet_min_overlap: 0.05
+  vest_min_overlap: 0.10
+  gloves_min_overlap: 0.01
+  boots_min_overlap: 0.01
+
+output:
+  output_dir: outputs/predictions
+  save_video: true
+  save_json: true
