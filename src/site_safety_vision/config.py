@@ -18,8 +18,8 @@ class ModelConfig:
 
 @dataclass
 class RulesConfig:
-    required_missing_frames: int = 5
-    recent_memory_frames: int = 15
+    unsafe_trigger_seconds: float = 5.0
+    recent_memory_seconds: float = 3.0
 
 
 @dataclass
@@ -77,8 +77,8 @@ def load_app_config(config_path: str | Path) -> AppConfig:
             tracker=model_data.get("tracker", "bytetrack.yaml"),
         ),
         rules=RulesConfig(
-            required_missing_frames=rules_data.get("required_missing_frames", 5),
-            recent_memory_frames=rules_data.get("recent_memory_frames", 15),
+            unsafe_trigger_seconds=rules_data.get("unsafe_trigger_seconds", 5.0),
+            recent_memory_seconds=rules_data.get("recent_memory_seconds", 3.0),
         ),
         matcher=MatcherConfig(
             helmet_min_overlap=matcher_data.get("helmet_min_overlap", 0.05),

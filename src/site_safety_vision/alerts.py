@@ -18,30 +18,9 @@ class Alert:
 
 
 class AlertGenerator:
-    """
-    Generate human-readable alerts from worker safety states.
-
-    Expected input:
-    - output rows from SafetyRulesEngine.evaluate_frame()
-
-    Output:
-    - structured alert dictionaries suitable for logging, UI display,
-      reporting, or annotated video overlays
-    """
-
     VALID_LEVELS = {"info", "warning", "critical"}
 
     def generate(self, worker_states: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Generate alerts for all workers in a frame.
-
-        Args:
-            worker_states:
-                List of worker state dictionaries returned by rules.py
-
-        Returns:
-            List of structured alerts.
-        """
         alerts: List[Dict[str, Any]] = []
 
         for worker in worker_states:
@@ -102,7 +81,11 @@ class AlertGenerator:
         for note in notes:
             note_lower = note.lower()
 
-            if "helmet missing" in note_lower:
+            if "no-hardhat detected" in note_lower:
+                reasons.append("NO-Hardhat detected")
+            elif "no-safety vest detected" in note_lower:
+                reasons.append("NO-Safety Vest detected")
+            elif "helmet missing" in note_lower:
                 reasons.append("Helmet missing")
             elif "vest missing" in note_lower:
                 reasons.append("Vest missing")

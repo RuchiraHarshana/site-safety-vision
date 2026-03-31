@@ -13,6 +13,8 @@ class PersonMatchResult:
     person_bbox: BBox
     helmet: Optional[Dict[str, Any]]
     vest: Optional[Dict[str, Any]]
+    no_hardhat: Optional[Dict[str, Any]]
+    no_safety_vest: Optional[Dict[str, Any]]
     gloves: List[Dict[str, Any]]
     boots: List[Dict[str, Any]]
     visibility: Dict[str, bool]
@@ -24,22 +26,29 @@ class PersonMatchResult:
 
 class PPEMatcher:
     """
-    Match PPE detections to tracked persons using simple geometric heuristics.
+    Match PPE detections to tracked persons using geometric heuristics.
 
-    Core compliance items:
-    - helmet
-    - vest
+    Positive evidence:
+    - Hardhat
+    - Safety Vest
+
+    Negative evidence:
+    - NO-Hardhat
+    - NO-Safety Vest
 
     Supplementary monitoring items:
-    - gloves
-    - boots
+    - Gloves
+    - Boots
     """
 
-    PERSON_CLASS = "person"
-    HELMET_CLASS = "helmet"
-    VEST_CLASS = "vest"
-    GLOVES_CLASS = "gloves"
-    BOOTS_CLASS = "boots"
+    # Canonical output class meanings we want to work with
+    PERSON_ALIASES = {"person"}
+    HELMET_ALIASES = {"helmet", "hardhat"}
+    VEST_ALIASES = {"vest", "safety vest"}
+    NO_HARDHAT_ALIASES = {"no-hardhat", "no hardhat"}
+    NO_SAFETY_VEST_ALIASES = {"no-safety vest", "no-safety-vest", "no safety vest"}
+    GLOVES_ALIASES = {"gloves"}
+    BOOTS_ALIASES = {"boots", "boot", "safety boot", "safety boots"}
 
     def __init__(
         self,
@@ -47,27 +56,24 @@ class PPEMatcher:
         vest_min_overlap: float = 0.10,
         gloves_min_overlap: float = 0.01,
         boots_min_overlap: float = 0.01,
+        negative_head_min_overlap: float = 0.10,
+        negative_torso_min_overlap: float = 0.15,
     ) -> None:
         self.helmet_min_overlap = helmet_min_overlap
         self.vest_min_overlap = vest_min_overlap
         self.gloves_min_overlap = gloves_min_overlap
         self.boots_min_overlap = boots_min_overlap
+        self.negative_head_min_overlap = negative_head_min_overlap
+        self.negative_torso_min_overlap = negative_torso_min_overlap
 
     def match(self, detections: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Match PPE items to each detected person.
-
-        Args:
-            detections: List of structured detections from detector.py
-
-        Returns:
-            A list of per-person match results.
-        """
-        persons = [d for d in detections if d.get("class_name") == self.PERSON_CLASS]
-        helmets = [d for d in detections if d.get("class_name") == self.HELMET_CLASS]
-        vests = [d for d in detections if d.get("class_name") == self.VEST_CLASS]
-        gloves = [d for d in detections if d.get("class_name") == self.GLOVES_CLASS]
-        boots = [d for d in detections if d.get("class_name") == self.BOOTS_CLASS]
+        persons = [d for d in detections if self._is_class(d, self.PERSON_ALIASES)]
+        helmets = [d for d in detections if self._is_class(d, self.HELMET_ALIASES)]
+        vests = [d for d in detections if self._is_class(d, self.VEST_ALIASES)]
+        no_hardhats = [d for d in detections if self._is_class(d, self.NO_HARDHAT_ALIASES)]
+        no_safety_vests = [d for d in detections if self._is_class(d, self.NO_SAFETY_VEST_ALIASES)]
+        gloves = [d for d in detections if self._is_class(d, self.GLOVES_ALIASES)]
+        boots = [d for d in detections if self._is_class(d, self.BOOTS_ALIASES)]
 
         results: List[Dict[str, Any]] = []
 
@@ -92,6 +98,20 @@ class PPEMatcher:
                 require_center_inside=True,
             )
 
+            no_hardhat_match = self._match_single_best(
+                candidates=no_hardhats,
+                target_region=head_region,
+                min_overlap=self.negative_head_min_overlap,
+                require_center_inside=False,
+            )
+
+            no_safety_vest_match = self._match_single_best(
+                candidates=no_safety_vests,
+                target_region=torso_region,
+                min_overlap=self.negative_torso_min_overlap,
+                require_center_inside=True,
+            )
+
             glove_matches = self._match_multiple(
                 candidates=gloves,
                 target_regions=[left_hand_region, right_hand_region],
@@ -104,13 +124,26 @@ class PPEMatcher:
                 min_overlap=self.boots_min_overlap,
             )
 
-            visibility, notes = self._estimate_visibility(person_bbox, helmet_match, vest_match)
+            visibility, notes = self._estimate_visibility(
+                person_bbox=person_bbox,
+                helmet_match=helmet_match,
+                vest_match=vest_match,
+                no_hardhat_match=no_hardhat_match,
+                no_safety_vest_match=no_safety_vest_match,
+            )
+
+            if helmet_match is not None and no_hardhat_match is not None:
+                notes.append("Conflicting helmet evidence detected.")
+            if vest_match is not None and no_safety_vest_match is not None:
+                notes.append("Conflicting vest evidence detected.")
 
             result = PersonMatchResult(
                 track_id=person.get("track_id"),
                 person_bbox=person_bbox,
                 helmet=helmet_match,
                 vest=vest_match,
+                no_hardhat=no_hardhat_match,
+                no_safety_vest=no_safety_vest_match,
                 gloves=glove_matches,
                 boots=boot_matches,
                 visibility=visibility,
@@ -119,6 +152,10 @@ class PPEMatcher:
             results.append(result.to_dict())
 
         return results
+
+    def _is_class(self, detection: Dict[str, Any], aliases: set[str]) -> bool:
+        class_name = str(detection.get("class_name", "")).strip().lower()
+        return class_name in aliases
 
     def _match_single_best(
         self,
@@ -186,13 +223,9 @@ class PPEMatcher:
         person_bbox: BBox,
         helmet_match: Optional[Dict[str, Any]],
         vest_match: Optional[Dict[str, Any]],
+        no_hardhat_match: Optional[Dict[str, Any]],
+        no_safety_vest_match: Optional[Dict[str, Any]],
     ) -> Tuple[Dict[str, bool], List[str]]:
-        """
-        Estimate whether helmet and vest should be reliably visible.
-
-        This is heuristic and intentionally conservative to support an
-        uncertainty-aware decision pipeline later.
-        """
         x1, y1, x2, y2 = person_bbox
         width = max(1.0, x2 - x1)
         height = max(1.0, y2 - y1)
@@ -208,11 +241,11 @@ class PPEMatcher:
             visibility["person_large_enough"] = False
             notes.append("Person appears too small for reliable PPE verification.")
 
-        if helmet_match is None and height < 100:
+        if helmet_match is None and no_hardhat_match is None and height < 100:
             visibility["head_region_visible"] = False
             notes.append("Head region may be too small or unclear for helmet verification.")
 
-        if vest_match is None and height < 140:
+        if vest_match is None and no_safety_vest_match is None and height < 140:
             visibility["torso_region_visible"] = False
             notes.append("Torso region may be too small or unclear for vest verification.")
 

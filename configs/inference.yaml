@@ -1,13 +1,13 @@
 model:
-  model_path: models/best.pt
+  model_path: models\best_merged_ppe_yolov8m.pt
   confidence_threshold: 0.25
   device: null
   image_size: 640
   tracker: bytetrack.yaml
 
 rules:
-  required_missing_frames: 5
-  recent_memory_frames: 15
+  unsafe_trigger_seconds: 6.0
+  recent_memory_seconds: 5.0
 
 matcher:
   helmet_min_overlap: 0.05

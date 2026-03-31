@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 
 @dataclass
@@ -20,80 +20,97 @@ class WorkerState:
 
 
 class SafetyRulesEngine:
-    """
-    Rule-based safety decision engine with temporal memory.
-
-    Input:
-        Per-person matched PPE results from matcher.py
-
-    Output:
-        Worker-level state:
-        - safe
-        - unsafe
-        - uncertain
-
-    Core compliance items:
-        - helmet
-        - vest
-
-    Supplementary items:
-        - gloves
-        - boots
-    """
-
     VALID_STATES = {"safe", "unsafe", "uncertain"}
 
     def __init__(
         self,
-        required_missing_frames: int = 5,
-        recent_memory_frames: int = 15,
+        unsafe_trigger_seconds: float = 5.0,
+        recent_memory_seconds: float = 3.0,
+        negative_evidence_trigger_seconds: float = 2.0,
     ) -> None:
-        """
-        Args:
-            required_missing_frames:
-                Number of consecutive frames a required PPE item can be missing
-                before the worker is classified as unsafe, provided visibility
-                is reliable.
-
-            recent_memory_frames:
-                Number of frames to retain a recently confirmed PPE observation.
-                This reduces false unsafe alerts from short-term occlusion.
-        """
-        self.required_missing_frames = required_missing_frames
-        self.recent_memory_frames = recent_memory_frames
+        self.unsafe_trigger_seconds = unsafe_trigger_seconds
+        self.recent_memory_seconds = recent_memory_seconds
+        self.negative_evidence_trigger_seconds = negative_evidence_trigger_seconds
         self.worker_memory: Dict[int, Dict[str, Any]] = {}
 
     def reset(self) -> None:
-        """Clear all worker memory."""
         self.worker_memory.clear()
 
-    def evaluate_frame(self, matched_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Evaluate all matched workers for a single frame.
-
-        Args:
-            matched_results:
-                Output list from PPEMatcher.match()
-
-        Returns:
-            List of worker state dictionaries.
-        """
+    def evaluate_frame(
+        self,
+        matched_results: List[Dict[str, Any]],
+        fps: float | None = None,
+        frame_duration_seconds: float | None = None,
+    ) -> List[Dict[str, Any]]:
         current_track_ids = set()
         frame_outputs: List[Dict[str, Any]] = []
 
+        fdur = self._resolve_frame_duration(
+            fps=fps,
+            frame_duration_seconds=frame_duration_seconds,
+        )
+
         for person_result in matched_results:
             track_id = person_result.get("track_id")
-
             if track_id is None:
-                # Skip untracked persons for temporal reasoning.
-                # If needed later, a fallback ID strategy can be added.
                 continue
 
             track_id = int(track_id)
             current_track_ids.add(track_id)
 
             memory = self._get_or_create_worker_memory(track_id)
-            self._update_memory_from_match(memory, person_result)
+
+            helmet_present = person_result.get("helmet") is not None
+            vest_present = person_result.get("vest") is not None
+            no_hardhat_present = person_result.get("no_hardhat") is not None
+            no_safety_vest_present = person_result.get("no_safety_vest") is not None
+
+            memory["frames_since_seen"] = 0
+            memory["absence_duration_seconds"] = 0.0
+
+            self._decay_recent_memory(memory, fdur)
+            self._decay_negative_memory(memory, fdur)
+
+            if helmet_present:
+                memory["helmet_missing_frames"] = 0
+            else:
+                memory["helmet_missing_frames"] += 1
+
+            if vest_present:
+                memory["vest_missing_frames"] = 0
+            else:
+                memory["vest_missing_frames"] += 1
+
+            if helmet_present:
+                memory["helmet_missing_duration"] = 0.0
+                memory["helmet_seen_recently"] = True
+                memory["helmet_recent_duration_remaining"] = self.recent_memory_seconds
+                memory["no_hardhat_duration"] = 0.0
+                memory["no_hardhat_seen_recently"] = False
+                memory["no_hardhat_recent_duration_remaining"] = 0.0
+            elif no_hardhat_present:
+                memory["no_hardhat_duration"] += fdur
+                memory["no_hardhat_seen_recently"] = True
+                memory["no_hardhat_recent_duration_remaining"] = self.negative_evidence_trigger_seconds
+                memory["helmet_missing_duration"] += fdur
+            else:
+                memory["helmet_missing_duration"] += fdur
+
+            if vest_present:
+                memory["vest_missing_duration"] = 0.0
+                memory["vest_seen_recently"] = True
+                memory["vest_recent_duration_remaining"] = self.recent_memory_seconds
+                memory["no_safety_vest_duration"] = 0.0
+                memory["no_safety_vest_seen_recently"] = False
+                memory["no_safety_vest_recent_duration_remaining"] = 0.0
+            elif no_safety_vest_present:
+                memory["no_safety_vest_duration"] += fdur
+                memory["no_safety_vest_seen_recently"] = True
+                memory["no_safety_vest_recent_duration_remaining"] = self.negative_evidence_trigger_seconds
+                memory["vest_missing_duration"] += fdur
+            else:
+                memory["vest_missing_duration"] += fdur
+
             state = self._decide_state(memory, person_result)
 
             output = WorkerState(
@@ -108,8 +125,21 @@ class SafetyRulesEngine:
             )
             frame_outputs.append(output.to_dict())
 
-        self._decay_memory_for_missing_tracks(current_track_ids)
+        self._decay_memory_for_missing_tracks(current_track_ids, fdur)
         return frame_outputs
+
+    def _resolve_frame_duration(
+        self,
+        fps: float | None,
+        frame_duration_seconds: float | None,
+    ) -> float:
+        if frame_duration_seconds is not None and frame_duration_seconds > 0:
+            return float(frame_duration_seconds)
+
+        if fps is not None and fps > 0:
+            return 1.0 / float(fps)
+
+        return 1.0
 
     def _get_or_create_worker_memory(self, track_id: int) -> Dict[str, Any]:
         if track_id not in self.worker_memory:
@@ -118,43 +148,60 @@ class SafetyRulesEngine:
                 "vest_seen_recently": False,
                 "helmet_missing_frames": 0,
                 "vest_missing_frames": 0,
-                "helmet_recent_counter": 0,
-                "vest_recent_counter": 0,
+                "helmet_missing_duration": 0.0,
+                "vest_missing_duration": 0.0,
+                "helmet_recent_duration_remaining": 0.0,
+                "vest_recent_duration_remaining": 0.0,
+                "no_hardhat_seen_recently": False,
+                "no_safety_vest_seen_recently": False,
+                "no_hardhat_duration": 0.0,
+                "no_safety_vest_duration": 0.0,
+                "no_hardhat_recent_duration_remaining": 0.0,
+                "no_safety_vest_recent_duration_remaining": 0.0,
                 "frames_since_seen": 0,
+                "absence_duration_seconds": 0.0,
             }
         return self.worker_memory[track_id]
 
-    def _update_memory_from_match(self, memory: Dict[str, Any], person_result: Dict[str, Any]) -> None:
-        helmet_present = person_result.get("helmet") is not None
-        vest_present = person_result.get("vest") is not None
-
-        if helmet_present:
-            memory["helmet_seen_recently"] = True
-            memory["helmet_recent_counter"] = self.recent_memory_frames
-            memory["helmet_missing_frames"] = 0
-        else:
-            memory["helmet_missing_frames"] += 1
-
-        if vest_present:
-            memory["vest_seen_recently"] = True
-            memory["vest_recent_counter"] = self.recent_memory_frames
-            memory["vest_missing_frames"] = 0
-        else:
-            memory["vest_missing_frames"] += 1
-
-        if memory["helmet_recent_counter"] > 0:
-            memory["helmet_recent_counter"] -= 1
-        else:
+    def _decay_recent_memory(self, memory: Dict[str, Any], fdur: float) -> None:
+        if memory["helmet_recent_duration_remaining"] > 0:
+            memory["helmet_recent_duration_remaining"] = max(
+                0.0,
+                memory["helmet_recent_duration_remaining"] - fdur,
+            )
+        if memory["helmet_recent_duration_remaining"] <= 0:
             memory["helmet_seen_recently"] = False
 
-        if memory["vest_recent_counter"] > 0:
-            memory["vest_recent_counter"] -= 1
-        else:
+        if memory["vest_recent_duration_remaining"] > 0:
+            memory["vest_recent_duration_remaining"] = max(
+                0.0,
+                memory["vest_recent_duration_remaining"] - fdur,
+            )
+        if memory["vest_recent_duration_remaining"] <= 0:
             memory["vest_seen_recently"] = False
 
-        memory["frames_since_seen"] = 0
+    def _decay_negative_memory(self, memory: Dict[str, Any], fdur: float) -> None:
+        if memory["no_hardhat_recent_duration_remaining"] > 0:
+            memory["no_hardhat_recent_duration_remaining"] = max(
+                0.0,
+                memory["no_hardhat_recent_duration_remaining"] - fdur,
+            )
+        if memory["no_hardhat_recent_duration_remaining"] <= 0:
+            memory["no_hardhat_seen_recently"] = False
 
-    def _decide_state(self, memory: Dict[str, Any], person_result: Dict[str, Any]) -> Dict[str, Any]:
+        if memory["no_safety_vest_recent_duration_remaining"] > 0:
+            memory["no_safety_vest_recent_duration_remaining"] = max(
+                0.0,
+                memory["no_safety_vest_recent_duration_remaining"] - fdur,
+            )
+        if memory["no_safety_vest_recent_duration_remaining"] <= 0:
+            memory["no_safety_vest_seen_recently"] = False
+
+    def _decide_state(
+        self,
+        memory: Dict[str, Any],
+        person_result: Dict[str, Any],
+    ) -> Dict[str, Any]:
         visibility = person_result.get("visibility", {})
         notes = list(person_result.get("notes", []))
         uncertain_reasons: List[str] = []
@@ -165,14 +212,19 @@ class SafetyRulesEngine:
 
         helmet_present_now = person_result.get("helmet") is not None
         vest_present_now = person_result.get("vest") is not None
+        no_hardhat_present_now = person_result.get("no_hardhat") is not None
+        no_safety_vest_present_now = person_result.get("no_safety_vest") is not None
 
         helmet_seen_recently = bool(memory["helmet_seen_recently"])
         vest_seen_recently = bool(memory["vest_seen_recently"])
+        no_hardhat_seen_recently = bool(memory["no_hardhat_seen_recently"])
+        no_safety_vest_seen_recently = bool(memory["no_safety_vest_seen_recently"])
 
-        helmet_missing_frames = int(memory["helmet_missing_frames"])
-        vest_missing_frames = int(memory["vest_missing_frames"])
+        helmet_missing_duration = float(memory["helmet_missing_duration"])
+        vest_missing_duration = float(memory["vest_missing_duration"])
+        no_hardhat_duration = float(memory["no_hardhat_duration"])
+        no_safety_vest_duration = float(memory["no_safety_vest_duration"])
 
-        # Small / unclear person -> uncertain
         if not person_large_enough:
             uncertain_reasons.append("Person is too small for reliable PPE verification.")
             return {
@@ -181,12 +233,25 @@ class SafetyRulesEngine:
                 "notes": notes,
             }
 
-        # Visibility-limited helmet reasoning
-        if not helmet_present_now and not helmet_seen_recently and not head_visible:
+        helmet_conflict = helmet_present_now and no_hardhat_present_now
+        vest_conflict = vest_present_now and no_safety_vest_present_now
+
+        if helmet_conflict:
+            uncertain_reasons.append("Conflicting helmet evidence detected.")
+        if vest_conflict:
+            uncertain_reasons.append("Conflicting vest evidence detected.")
+
+        if uncertain_reasons:
+            return {
+                "state": "uncertain",
+                "uncertain_reasons": uncertain_reasons,
+                "notes": notes,
+            }
+
+        if not helmet_present_now and not helmet_seen_recently and not no_hardhat_present_now and not head_visible:
             uncertain_reasons.append("Helmet cannot be verified because the head region is unclear.")
 
-        # Visibility-limited vest reasoning
-        if not vest_present_now and not vest_seen_recently and not torso_visible:
+        if not vest_present_now and not vest_seen_recently and not no_safety_vest_present_now and not torso_visible:
             uncertain_reasons.append("Vest cannot be verified because the torso region is unclear.")
 
         if uncertain_reasons:
@@ -196,33 +261,28 @@ class SafetyRulesEngine:
                 "notes": notes,
             }
 
-        # Unsafe: required PPE absent long enough with reliable visibility
-        helmet_unverified_for_too_long = (
-            not helmet_present_now
-            and not helmet_seen_recently
+        helmet_negative_strong = (
+            (no_hardhat_present_now or no_hardhat_seen_recently)
             and head_visible
-            and helmet_missing_frames >= self.required_missing_frames
+            and no_hardhat_duration >= self.negative_evidence_trigger_seconds
         )
-
-        vest_unverified_for_too_long = (
-            not vest_present_now
-            and not vest_seen_recently
+        vest_negative_strong = (
+            (no_safety_vest_present_now or no_safety_vest_seen_recently)
             and torso_visible
-            and vest_missing_frames >= self.required_missing_frames
+            and no_safety_vest_duration >= self.negative_evidence_trigger_seconds
         )
 
-        if helmet_unverified_for_too_long or vest_unverified_for_too_long:
-            if helmet_unverified_for_too_long:
-                notes.append("Helmet missing for multiple consecutive frames.")
-            if vest_unverified_for_too_long:
-                notes.append("Vest missing for multiple consecutive frames.")
+        if helmet_negative_strong or vest_negative_strong:
+            if helmet_negative_strong:
+                notes.append(f"NO-Hardhat detected for {no_hardhat_duration:.2f} seconds.")
+            if vest_negative_strong:
+                notes.append(f"NO-Safety Vest detected for {no_safety_vest_duration:.2f} seconds.")
             return {
                 "state": "unsafe",
                 "uncertain_reasons": [],
                 "notes": notes,
             }
 
-        # Safe: required PPE is visible now or recently confirmed
         helmet_ok = helmet_present_now or helmet_seen_recently
         vest_ok = vest_present_now or vest_seen_recently
 
@@ -233,10 +293,36 @@ class SafetyRulesEngine:
                 "notes": notes,
             }
 
-        # Fallback uncertainty for transitional frames
-        if not helmet_ok:
+        helmet_unverified_for_too_long = (
+            not helmet_present_now
+            and not helmet_seen_recently
+            and not no_hardhat_present_now
+            and head_visible
+            and helmet_missing_duration >= self.unsafe_trigger_seconds
+        )
+
+        vest_unverified_for_too_long = (
+            not vest_present_now
+            and not vest_seen_recently
+            and not no_safety_vest_present_now
+            and torso_visible
+            and vest_missing_duration >= self.unsafe_trigger_seconds
+        )
+
+        if helmet_unverified_for_too_long or vest_unverified_for_too_long:
+            if helmet_unverified_for_too_long:
+                notes.append(f"Helmet missing for {helmet_missing_duration:.2f} seconds.")
+            if vest_unverified_for_too_long:
+                notes.append(f"Vest missing for {vest_missing_duration:.2f} seconds.")
+            return {
+                "state": "unsafe",
+                "uncertain_reasons": [],
+                "notes": notes,
+            }
+
+        if not helmet_ok and not helmet_negative_strong:
             uncertain_reasons.append("Helmet status is temporarily unresolved.")
-        if not vest_ok:
+        if not vest_ok and not vest_negative_strong:
             uncertain_reasons.append("Vest status is temporarily unresolved.")
 
         return {
@@ -245,31 +331,26 @@ class SafetyRulesEngine:
             "notes": notes,
         }
 
-    def _decay_memory_for_missing_tracks(self, current_track_ids: set[int]) -> None:
-        """
-        Age memory for workers not seen in the current frame.
-        This prevents stale memory from persisting forever.
-        """
+    def _decay_memory_for_missing_tracks(
+        self,
+        current_track_ids: set[int],
+        fdur: float,
+    ) -> None:
         tracks_to_delete: List[int] = []
 
-        for track_id, memory in self.worker_memory.items():
+        for track_id, memory in list(self.worker_memory.items()):
             if track_id in current_track_ids:
                 continue
 
             memory["frames_since_seen"] += 1
+            memory["absence_duration_seconds"] += fdur
 
-            if memory["helmet_recent_counter"] > 0:
-                memory["helmet_recent_counter"] -= 1
-            else:
-                memory["helmet_seen_recently"] = False
+            self._decay_recent_memory(memory, fdur)
+            self._decay_negative_memory(memory, fdur)
 
-            if memory["vest_recent_counter"] > 0:
-                memory["vest_recent_counter"] -= 1
-            else:
-                memory["vest_seen_recently"] = False
-
-            # Remove worker memory if absent for too long
-            if memory["frames_since_seen"] > self.recent_memory_frames * 2:
+            cleanup_threshold = max(self.recent_memory_seconds * 2, 1.0)
+            epsilon = 1e-9
+            if memory["absence_duration_seconds"] + epsilon >= cleanup_threshold:
                 tracks_to_delete.append(track_id)
 
         for track_id in tracks_to_delete:

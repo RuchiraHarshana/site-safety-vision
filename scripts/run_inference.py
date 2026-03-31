@@ -6,12 +6,12 @@ from typing import Any, Dict, List, Optional
 
 import cv2
 
-from src.site_safety_vision.alerts import AlertGenerator
-from src.site_safety_vision.config import AppConfig, load_app_config, resolve_repo_path
-from src.site_safety_vision.detector import Detector
-from src.site_safety_vision.matcher import PPEMatcher
-from src.site_safety_vision.rules import SafetyRulesEngine
-from src.site_safety_vision.utils import (
+from site_safety_vision.alerts import AlertGenerator
+from site_safety_vision.config import AppConfig, load_app_config, resolve_repo_path
+from site_safety_vision.detector import Detector
+from site_safety_vision.matcher import PPEMatcher
+from site_safety_vision.rules import SafetyRulesEngine
+from site_safety_vision.utils import (
     build_output_path,
     ensure_dir,
     is_image_file,
@@ -19,7 +19,7 @@ from src.site_safety_vision.utils import (
     save_json,
     validate_file_path,
 )
-from src.site_safety_vision.visualization import Visualizer
+from site_safety_vision.visualization import Visualizer
 
 
 def parse_args() -> argparse.Namespace:
@@ -81,8 +81,8 @@ def build_pipeline(config: AppConfig) -> Dict[str, Any]:
     )
 
     rules_engine = SafetyRulesEngine(
-        required_missing_frames=config.rules.required_missing_frames,
-        recent_memory_frames=config.rules.recent_memory_frames,
+        unsafe_trigger_seconds=config.rules.unsafe_trigger_seconds,
+        recent_memory_seconds=config.rules.recent_memory_seconds,
     )
 
     alert_generator = AlertGenerator()
@@ -120,7 +120,8 @@ def process_image(
         persist=False,
     )
     matched_results = matcher.match(detections)
-    worker_states = rules_engine.evaluate_frame(matched_results)
+    # For images, use a conservative fallback for frame duration (e.g., 1.0s)
+    worker_states = rules_engine.evaluate_frame(matched_results, frame_duration_seconds=1.0)
     alerts = alert_generator.generate(worker_states)
 
     annotated = visualizer.annotate_frame(
@@ -213,7 +214,7 @@ def process_video(
                 persist=True,
             )
             matched_results = matcher.match(detections)
-            worker_states = rules_engine.evaluate_frame(matched_results)
+            worker_states = rules_engine.evaluate_frame(matched_results, fps=fps)
             alerts = alert_generator.generate(worker_states)
 
             annotated = visualizer.annotate_frame(

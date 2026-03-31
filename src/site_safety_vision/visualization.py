@@ -20,12 +20,35 @@ class Visualizer:
     - return annotated frames for saving or display
     """
 
+    NEGATIVE_PPE_CLASSES = {"no-hardhat", "no hardhat", "no-safety vest", "no-safety-vest", "no safety vest"}
+
     def __init__(self) -> None:
         self.default_detection_color: Color = (255, 255, 0)
         self.safe_color: Color = (0, 200, 0)
         self.unsafe_color: Color = (0, 0, 255)
         self.uncertain_color: Color = (0, 165, 255)
         self.text_color: Color = (255, 255, 255)
+
+    def _get_scale_params(self, frame: np.ndarray) -> dict:
+        """
+        Compute scaling parameters based on frame height.
+        Returns a dict with thickness, font_scale, text_thickness, and scale.
+        """
+        frame_height = frame.shape[0]
+        scale = frame_height / 720.0
+        thickness = max(2, int(2 * scale))
+        font_scale = max(0.5, 0.6 * scale)
+        text_thickness = max(1, int(2 * scale))
+        small_font_scale = max(0.45, 0.45 * scale)
+        small_text_thickness = max(1, int(1 * scale))
+        return {
+            "scale": scale,
+            "thickness": thickness,
+            "font_scale": font_scale,
+            "text_thickness": text_thickness,
+            "small_font_scale": small_font_scale,
+            "small_text_thickness": small_text_thickness,
+        }
 
     def annotate_frame(
         self,
@@ -56,9 +79,10 @@ class Visualizer:
             if worker.get("track_id") is not None
         }
 
-        self._draw_detections(annotated, detections, state_by_track_id)
-        self._draw_worker_states(annotated, matched_results, state_by_track_id)
-        self._draw_alert_summary(annotated, alerts)
+        scale_params = self._get_scale_params(annotated)
+        self._draw_detections(annotated, detections, state_by_track_id, scale_params)
+        self._draw_worker_states(annotated, matched_results, state_by_track_id, scale_params)
+        self._draw_alert_summary(annotated, alerts, scale_params)
 
         return annotated
 
@@ -67,13 +91,15 @@ class Visualizer:
         frame: np.ndarray,
         detections: List[Dict[str, Any]],
         state_by_track_id: Dict[int, Dict[str, Any]],
+        scale_params: dict,
     ) -> None:
         for det in detections:
             bbox = det.get("bbox")
             if bbox is None:
                 continue
 
-            class_name = det.get("class_name", "unknown")
+            class_name = str(det.get("class_name", "unknown"))
+            class_name_lower = class_name.strip().lower()
             confidence = float(det.get("confidence", 0.0))
             track_id = det.get("track_id")
 
@@ -83,18 +109,32 @@ class Visualizer:
             if track_id is not None:
                 label = f"ID {track_id} | {label}"
 
-            if class_name == "person" and track_id is not None:
+            # Make negative PPE detections red
+            if class_name_lower in self.NEGATIVE_PPE_CLASSES:
+                color = self.unsafe_color
+
+            # Keep tracked person box colored by worker state
+            elif class_name_lower == "person" and track_id is not None:
                 worker = state_by_track_id.get(int(track_id))
                 if worker is not None:
                     color = self._get_state_color(worker.get("state", "uncertain"))
 
-            self._draw_box(frame, bbox, label, color)
+            self._draw_box(
+                frame,
+                bbox,
+                label,
+                color,
+                thickness=scale_params["thickness"],
+                font_scale=scale_params["font_scale"],
+                text_thickness=scale_params["text_thickness"],
+            )
 
     def _draw_worker_states(
         self,
         frame: np.ndarray,
         matched_results: List[Dict[str, Any]],
         state_by_track_id: Dict[int, Dict[str, Any]],
+        scale_params: dict,
     ) -> None:
         for match in matched_results:
             track_id = match.get("track_id")
@@ -120,8 +160,8 @@ class Visualizer:
                 state_text,
                 (x1, max(40, y1 - 28)),
                 color,
-                font_scale=0.65,
-                thickness=2,
+                font_scale=scale_params["font_scale"],
+                thickness=scale_params["text_thickness"],
             )
 
             detail_text = self._build_detail_text(match, notes, uncertain_reasons)
@@ -131,38 +171,36 @@ class Visualizer:
                     detail_text[:100],
                     (x1, max(60, y1 - 8)),
                     color,
-                    font_scale=0.45,
-                    thickness=1,
+                    font_scale=scale_params["small_font_scale"],
+                    thickness=scale_params["small_text_thickness"],
                 )
 
     def _draw_alert_summary(
         self,
         frame: np.ndarray,
         alerts: List[Dict[str, Any]],
+        scale_params: dict,
     ) -> None:
         if not alerts:
             return
 
         y_offset = 30
         max_alerts_to_draw = 5
-
         for alert in alerts[:max_alerts_to_draw]:
             level = str(alert.get("level", "info")).upper()
             message = str(alert.get("message", ""))
             state = str(alert.get("state", "uncertain")).lower()
-
             color = self._get_state_color(state)
             summary_line = f"[{level}] {message}"
-
             self._draw_text(
                 frame,
                 summary_line[:120],
                 (20, y_offset),
                 color,
-                font_scale=0.55,
-                thickness=2,
+                font_scale=scale_params["font_scale"] * 0.9,
+                thickness=scale_params["text_thickness"],
             )
-            y_offset += 25
+            y_offset += int(30 * scale_params["scale"])
 
     def _build_detail_text(
         self,
@@ -176,6 +214,10 @@ class Visualizer:
             parts.append("helmet")
         if match.get("vest") is not None:
             parts.append("vest")
+        if match.get("no_hardhat") is not None:
+            parts.append("NO-hardhat")
+        if match.get("no_safety_vest") is not None:
+            parts.append("NO-safety-vest")
         if match.get("gloves"):
             parts.append("gloves")
         if match.get("boots"):
@@ -201,6 +243,8 @@ class Visualizer:
         label: str,
         color: Color,
         thickness: int = 2,
+        font_scale: float = 0.55,
+        text_thickness: int = 2,
     ) -> None:
         x1, y1, x2, y2 = [int(v) for v in bbox]
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
@@ -211,8 +255,8 @@ class Visualizer:
             label,
             (x1, text_y),
             color,
-            font_scale=0.55,
-            thickness=2,
+            font_scale=font_scale,
+            thickness=text_thickness,
         )
 
     def _draw_text(
@@ -224,6 +268,15 @@ class Visualizer:
         font_scale: float = 0.5,
         thickness: int = 1,
     ) -> None:
+        text_size, baseline = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+        x, y = origin
+
+        rect_x1 = x - 2
+        rect_y1 = y - text_size[1] - 4
+        rect_x2 = x + text_size[0] + 2
+        rect_y2 = y + baseline + 4
+        cv2.rectangle(frame, (rect_x1, rect_y1), (rect_x2, rect_y2), (0, 0, 0), -1)
+
         cv2.putText(
             frame,
             text,
