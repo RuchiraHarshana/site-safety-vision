@@ -5,11 +5,11 @@
 # Ignore everything in data
 data/*
 
-# Keep folder structure
+# Ignore all data files
+data/*
 !data/.gitkeep
 !data/samples/
 !data/samples/.gitkeep
-
 # Allow ONLY mp4 files
 !data/**/*.mp4
 
