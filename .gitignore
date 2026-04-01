@@ -1,36 +1,24 @@
 # =========================
-# DATA (Track only .mp4)
+# DATA (ignore contents, keep structure only)
 # =========================
 
-# Ignore everything in data
-data/*
-
-# Ignore all data files
 data/*
 !data/.gitkeep
 !data/samples/
 !data/samples/.gitkeep
-# Allow ONLY mp4 files
-!data/**/*.mp4
-
-# Ignore other video formats
-data/**/*.avi
-data/**/*.mov
-data/**/*.mkv
 
 
 # =========================
-# OUTPUTS (Ignore everything)
+# OUTPUTS (ignore contents, keep structure only)
 # =========================
 
-# Ignore outputs contents but keep structure
 outputs/*
 !outputs/.gitkeep
 !outputs/predictions/
 outputs/predictions/*
 !outputs/predictions/.gitkeep
 
-# Ignore all generated artifacts
+# Ignore generated artifacts
 outputs/**/*.mp4
 outputs/**/*.avi
 outputs/**/*.mov
@@ -39,10 +27,10 @@ outputs/**/*.json
 
 
 # =========================
-# MODELS
+# MODELS (track .pt files)
 # =========================
 
-#models/*.pt
+# Do not ignore model weights
 
 
 # =========================
