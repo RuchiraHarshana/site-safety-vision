@@ -1,36 +1,64 @@
-# Ignore data contents but keep folder structure
+# =========================
+# DATA (Track only .mp4)
+# =========================
+
+# Ignore everything in data
 data/*
+
+# Keep folder structure
 !data/.gitkeep
 !data/samples/
-data/samples/*
 !data/samples/.gitkeep
 
-# Ignore outputs contents but keep folder structure
+# Allow ONLY mp4 files
+!data/**/*.mp4
+
+# Ignore other video formats
+data/**/*.avi
+data/**/*.mov
+data/**/*.mkv
+
+
+# =========================
+# OUTPUTS (Ignore everything)
+# =========================
+
+# Ignore outputs contents but keep structure
 outputs/*
 !outputs/.gitkeep
 !outputs/predictions/
 outputs/predictions/*
 !outputs/predictions/.gitkeep
 
-# Ignore generated artifacts
+# Ignore all generated artifacts
 outputs/**/*.mp4
 outputs/**/*.avi
 outputs/**/*.mov
 outputs/**/*.mkv
 outputs/**/*.json
-data/**/*.mp4
-data/**/*.avi
-data/**/*.mov
-data/**/*.mkv
-models/*.pt
 
-# Python cache
+
+# =========================
+# MODELS
+# =========================
+
+#models/*.pt
+
+
+# =========================
+# PYTHON CACHE
+# =========================
+
 __pycache__/
 *.py[cod]
 *$py.class
 src/**/__pycache__/
 
-# Virtual environments
+
+# =========================
+# VIRTUAL ENVIRONMENTS
+# =========================
+
 .venv/
 venv/
 ENV/
@@ -38,10 +66,18 @@ env/
 env.bak/
 venv.bak/
 
-# Notebook checkpoints
+
+# =========================
+# NOTEBOOKS
+# =========================
+
 .ipynb_checkpoints/
 
-# Build / packaging
+
+# =========================
+# BUILD / PACKAGING
+# =========================
+
 .Python
 build/
 develop-eggs/
@@ -58,18 +94,34 @@ var/
 .installed.cfg
 *.egg
 
-# C extensions
+
+# =========================
+# C EXTENSIONS
+# =========================
+
 *.so
 
-# PyInstaller
+
+# =========================
+# PYINSTALLER
+# =========================
+
 *.manifest
 *.spec
 
-# Installer logs
+
+# =========================
+# INSTALLER LOGS
+# =========================
+
 pip-log.txt
 pip-delete-this-directory.txt
 
-# Test / coverage
+
+# =========================
+# TEST / COVERAGE
+# =========================
+
 htmlcov/
 .tox/
 .nox/
@@ -86,10 +138,18 @@ coverage.xml
 dmypy.json
 .pyre/
 
-# VS Code
+
+# =========================
+# VS CODE
+# =========================
+
 .vscode/
 
-# OS files
+
+# =========================
+# OS FILES
+# =========================
+
 .DS_Store
 Thumbs.db
 ehthumbs.db
