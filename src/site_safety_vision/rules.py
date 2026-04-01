@@ -1,3 +1,4 @@
+#rules.py
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
@@ -12,6 +13,10 @@ class WorkerState:
     vest_seen_recently: bool
     helmet_missing_frames: int
     vest_missing_frames: int
+    unsafe_duration: float
+    uncertain_duration: float
+    risk_level: str
+    risk_score: int
     uncertain_reasons: List[str]
     notes: List[str]
 
@@ -113,6 +118,19 @@ class SafetyRulesEngine:
 
             state = self._decide_state(memory, person_result)
 
+            # Violation timer update
+            if state["state"] == "unsafe":
+                memory["unsafe_duration"] += fdur
+            else:
+                memory["unsafe_duration"] = 0.0
+
+            if state["state"] == "uncertain":
+                memory["uncertain_duration"] += fdur
+            else:
+                memory["uncertain_duration"] = 0.0
+
+            risk_score, risk_level = self._calculate_risk(memory, state["state"])
+
             output = WorkerState(
                 track_id=track_id,
                 state=state["state"],
@@ -120,6 +138,10 @@ class SafetyRulesEngine:
                 vest_seen_recently=memory["vest_seen_recently"],
                 helmet_missing_frames=memory["helmet_missing_frames"],
                 vest_missing_frames=memory["vest_missing_frames"],
+                unsafe_duration=memory["unsafe_duration"],
+                uncertain_duration=memory["uncertain_duration"],
+                risk_level=risk_level,
+                risk_score=risk_score,
                 uncertain_reasons=state["uncertain_reasons"],
                 notes=state["notes"],
             )
@@ -127,6 +149,47 @@ class SafetyRulesEngine:
 
         self._decay_memory_for_missing_tracks(current_track_ids, fdur)
         return frame_outputs
+
+    def _calculate_risk(self, memory: Dict[str, Any], state: str) -> tuple[int, str]:
+        score = 0
+
+        # State-based weighting
+        if state == "unsafe":
+            score += 3
+        elif state == "uncertain":
+            score += 1
+
+        # Timer-based weighting
+        if memory["unsafe_duration"] >= 2.0:
+            score += 2
+        elif memory["unsafe_duration"] > 0.0:
+            score += 1
+
+        if memory["uncertain_duration"] >= 2.0:
+            score += 1
+
+        # Negative evidence weighting
+        if memory["no_hardhat_duration"] >= self.negative_evidence_trigger_seconds:
+            score += 2
+        elif memory["no_hardhat_duration"] > 0.0:
+            score += 1
+
+        if memory["no_safety_vest_duration"] >= self.negative_evidence_trigger_seconds:
+            score += 1
+        elif memory["no_safety_vest_duration"] > 0.0:
+            score += 1
+
+        # Long unresolved missing PPE
+        if memory["helmet_missing_duration"] >= self.unsafe_trigger_seconds:
+            score += 1
+        if memory["vest_missing_duration"] >= self.unsafe_trigger_seconds:
+            score += 1
+
+        if score >= 4:
+            return score, "high"
+        if score >= 2:
+            return score, "medium"
+        return score, "low"
 
     def _resolve_frame_duration(
         self,
@@ -160,6 +223,8 @@ class SafetyRulesEngine:
                 "no_safety_vest_recent_duration_remaining": 0.0,
                 "frames_since_seen": 0,
                 "absence_duration_seconds": 0.0,
+                "unsafe_duration": 0.0,
+                "uncertain_duration": 0.0,
             }
         return self.worker_memory[track_id]
 
@@ -217,19 +282,16 @@ class SafetyRulesEngine:
 
         helmet_seen_recently = bool(memory["helmet_seen_recently"])
         vest_seen_recently = bool(memory["vest_seen_recently"])
-        no_hardhat_seen_recently = bool(memory["no_hardhat_seen_recently"])
-        no_safety_vest_seen_recently = bool(memory["no_safety_vest_seen_recently"])
 
-        helmet_missing_duration = float(memory["helmet_missing_duration"])
-        vest_missing_duration = float(memory["vest_missing_duration"])
         no_hardhat_duration = float(memory["no_hardhat_duration"])
         no_safety_vest_duration = float(memory["no_safety_vest_duration"])
+        helmet_missing_duration = float(memory["helmet_missing_duration"])
+        vest_missing_duration = float(memory["vest_missing_duration"])
 
         if not person_large_enough:
-            uncertain_reasons.append("Person is too small for reliable PPE verification.")
             return {
                 "state": "uncertain",
-                "uncertain_reasons": uncertain_reasons,
+                "uncertain_reasons": ["Person too small"],
                 "notes": notes,
             }
 
@@ -237,22 +299,9 @@ class SafetyRulesEngine:
         vest_conflict = vest_present_now and no_safety_vest_present_now
 
         if helmet_conflict:
-            uncertain_reasons.append("Conflicting helmet evidence detected.")
+            uncertain_reasons.append("Conflicting helmet evidence")
         if vest_conflict:
-            uncertain_reasons.append("Conflicting vest evidence detected.")
-
-        if uncertain_reasons:
-            return {
-                "state": "uncertain",
-                "uncertain_reasons": uncertain_reasons,
-                "notes": notes,
-            }
-
-        if not helmet_present_now and not helmet_seen_recently and not no_hardhat_present_now and not head_visible:
-            uncertain_reasons.append("Helmet cannot be verified because the head region is unclear.")
-
-        if not vest_present_now and not vest_seen_recently and not no_safety_vest_present_now and not torso_visible:
-            uncertain_reasons.append("Vest cannot be verified because the torso region is unclear.")
+            uncertain_reasons.append("Conflicting vest evidence")
 
         if uncertain_reasons:
             return {
@@ -262,21 +311,23 @@ class SafetyRulesEngine:
             }
 
         helmet_negative_strong = (
-            (no_hardhat_present_now or no_hardhat_seen_recently)
+            no_hardhat_present_now
             and head_visible
             and no_hardhat_duration >= self.negative_evidence_trigger_seconds
         )
+
         vest_negative_strong = (
-            (no_safety_vest_present_now or no_safety_vest_seen_recently)
+            no_safety_vest_present_now
             and torso_visible
             and no_safety_vest_duration >= self.negative_evidence_trigger_seconds
         )
 
         if helmet_negative_strong or vest_negative_strong:
             if helmet_negative_strong:
-                notes.append(f"NO-Hardhat detected for {no_hardhat_duration:.2f} seconds.")
+                notes.append(f"NO-Hardhat detected ({no_hardhat_duration:.2f}s)")
             if vest_negative_strong:
-                notes.append(f"NO-Safety Vest detected for {no_safety_vest_duration:.2f} seconds.")
+                notes.append(f"NO-Safety Vest detected ({no_safety_vest_duration:.2f}s)")
+
             return {
                 "state": "unsafe",
                 "uncertain_reasons": [],
@@ -293,37 +344,46 @@ class SafetyRulesEngine:
                 "notes": notes,
             }
 
-        helmet_unverified_for_too_long = (
-            not helmet_present_now
-            and not helmet_seen_recently
+        if not head_visible:
+            uncertain_reasons.append("Head not visible")
+        if not torso_visible:
+            uncertain_reasons.append("Torso not visible")
+
+        if uncertain_reasons:
+            return {
+                "state": "uncertain",
+                "uncertain_reasons": uncertain_reasons,
+                "notes": notes,
+            }
+
+        helmet_missing_long = (
+            not helmet_ok
             and not no_hardhat_present_now
-            and head_visible
             and helmet_missing_duration >= self.unsafe_trigger_seconds
         )
 
-        vest_unverified_for_too_long = (
-            not vest_present_now
-            and not vest_seen_recently
+        vest_missing_long = (
+            not vest_ok
             and not no_safety_vest_present_now
-            and torso_visible
             and vest_missing_duration >= self.unsafe_trigger_seconds
         )
 
-        if helmet_unverified_for_too_long or vest_unverified_for_too_long:
-            if helmet_unverified_for_too_long:
-                notes.append(f"Helmet missing for {helmet_missing_duration:.2f} seconds.")
-            if vest_unverified_for_too_long:
-                notes.append(f"Vest missing for {vest_missing_duration:.2f} seconds.")
+        if helmet_missing_long or vest_missing_long:
+            if helmet_missing_long:
+                notes.append(f"Helmet missing ({helmet_missing_duration:.2f}s)")
+            if vest_missing_long:
+                notes.append(f"Vest missing ({vest_missing_duration:.2f}s)")
+
             return {
                 "state": "unsafe",
                 "uncertain_reasons": [],
                 "notes": notes,
             }
 
-        if not helmet_ok and not helmet_negative_strong:
-            uncertain_reasons.append("Helmet status is temporarily unresolved.")
-        if not vest_ok and not vest_negative_strong:
-            uncertain_reasons.append("Vest status is temporarily unresolved.")
+        if not helmet_ok:
+            uncertain_reasons.append("Helmet unresolved")
+        if not vest_ok:
+            uncertain_reasons.append("Vest unresolved")
 
         return {
             "state": "uncertain",
@@ -347,6 +407,10 @@ class SafetyRulesEngine:
 
             self._decay_recent_memory(memory, fdur)
             self._decay_negative_memory(memory, fdur)
+
+            if memory["absence_duration_seconds"] > fdur:
+                memory["unsafe_duration"] = 0.0
+                memory["uncertain_duration"] = 0.0
 
             cleanup_threshold = max(self.recent_memory_seconds * 2, 1.0)
             epsilon = 1e-9

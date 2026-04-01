@@ -1,9 +1,9 @@
-#detector.py
+# detector.py 
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -44,11 +44,19 @@ class Detector:
         confidence_threshold: float = 0.25,
         device: Optional[str] = None,
         image_size: Optional[int] = None,
+        tracking_person_confidence_threshold: float = 0.40,
+        min_tracking_person_width: float = 40.0,
+        min_tracking_person_height: float = 80.0,
     ) -> None:
         self.model_path = Path(model_path)
         self.confidence_threshold = confidence_threshold
         self.device = device
         self.image_size = image_size
+
+        # Tracking cleanup thresholds for PERSON only
+        self.tracking_person_confidence_threshold = tracking_person_confidence_threshold
+        self.min_tracking_person_width = min_tracking_person_width
+        self.min_tracking_person_height = min_tracking_person_height
 
         if not self.model_path.exists():
             raise FileNotFoundError(f"Model file not found: {self.model_path}")
@@ -125,16 +133,28 @@ class Detector:
 
         return detections
 
+    def _is_person_detection(self, detection: Detection) -> bool:
+        return detection.class_name.strip().lower() == "person"
+
+    def _is_valid_tracking_person(self, detection: Detection) -> bool:
+        if not self._is_person_detection(detection):
+            return False
+
+        if detection.confidence < self.tracking_person_confidence_threshold:
+            return False
+
+        x1, y1, x2, y2 = detection.bbox
+        width = x2 - x1
+        height = y2 - y1
+
+        if width < self.min_tracking_person_width:
+            return False
+        if height < self.min_tracking_person_height:
+            return False
+
+        return True
+
     def predict_image(self, image: ImageInput) -> List[Dict[str, Any]]:
-        """
-        Run object detection on a single image.
-
-        Args:
-            image: Image file path or numpy array.
-
-        Returns:
-            A list of structured detections.
-        """
         source = self._validate_image_input(image)
         results = self.model.predict(source=source, **self._predict_kwargs())
 
@@ -145,15 +165,6 @@ class Detector:
         return [det.to_dict() for det in detections]
 
     def predict_frame(self, frame: np.ndarray) -> List[Dict[str, Any]]:
-        """
-        Run object detection on a single video frame.
-
-        Args:
-            frame: BGR numpy array read by OpenCV.
-
-        Returns:
-            A list of structured detections.
-        """
         if not isinstance(frame, np.ndarray):
             raise TypeError("frame must be a numpy.ndarray.")
         if frame.size == 0:
@@ -176,13 +187,10 @@ class Detector:
         """
         Run tracking on a single frame using YOLOv8 + ByteTrack.
 
-        Args:
-            frame: BGR numpy array.
-            tracker_config: Tracker config file name.
-            persist: Keep track state across sequential calls.
-
-        Returns:
-            A list of structured tracked detections.
+        Important behavior:
+        - Return ALL detections so matcher can still see PPE classes
+        - Keep track IDs only for stable PERSON detections
+        - Remove unstable person track IDs to reduce fragmentation
         """
         if not isinstance(frame, np.ndarray):
             raise TypeError("frame must be a numpy.ndarray.")
@@ -200,8 +208,26 @@ class Detector:
         if not results:
             return []
 
-        detections = self._parse_result(results[0], include_tracking=True)
-        return [det.to_dict() for det in detections]
+        all_detections = self._parse_result(results[0], include_tracking=True)
+        cleaned_detections: List[Dict[str, Any]] = []
+
+        for det in all_detections:
+            det_dict = det.to_dict()
+
+            # Keep all PPE detections, but only trust tracking IDs for strong persons
+            if self._is_person_detection(det):
+                if self._is_valid_tracking_person(det):
+                    cleaned_detections.append(det_dict)
+                else:
+                    # Keep the person box, but remove unstable tracking ID
+                    det_dict["track_id"] = None
+                    cleaned_detections.append(det_dict)
+            else:
+                # PPE and other classes remain available to matcher, but should not drive worker tracking
+                det_dict["track_id"] = None
+                cleaned_detections.append(det_dict)
+
+        return cleaned_detections
 
     def process_video(
         self,
@@ -211,19 +237,6 @@ class Detector:
         persist: bool = True,
         max_frames: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        Process a video file frame by frame.
-
-        Args:
-            video_path: Path to the input video.
-            use_tracking: Whether to run ByteTrack-based tracking.
-            tracker_config: Tracker config file name.
-            persist: Keep track state across frames.
-            max_frames: Optional cap for number of frames to process.
-
-        Returns:
-            A list of per-frame results with frame index and detections.
-        """
         video_path = Path(video_path)
         if not video_path.exists():
             raise FileNotFoundError(f"Video file not found: {video_path}")
@@ -273,21 +286,6 @@ class Detector:
         persist: bool = True,
         max_frames: Optional[int] = None,
     ) -> Iterator[Dict[str, Any]]:
-        """
-        Yield per-frame video results one at a time.
-
-        Useful for downstream streaming pipelines.
-
-        Args:
-            video_path: Path to the input video.
-            use_tracking: Whether to run ByteTrack-based tracking.
-            tracker_config: Tracker config file name.
-            persist: Keep track state across frames.
-            max_frames: Optional cap for number of frames to process.
-
-        Yields:
-            Dictionary containing frame_index and detections.
-        """
         video_path = Path(video_path)
         if not video_path.exists():
             raise FileNotFoundError(f"Video file not found: {video_path}")

@@ -1,3 +1,4 @@
+#inference.yamlconfiguration for PPE detection and safety rule violation detection
 model:
   model_path: models\best_merged_ppe_yolov8m.pt
   confidence_threshold: 0.25

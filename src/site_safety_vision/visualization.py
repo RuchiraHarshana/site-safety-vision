@@ -1,3 +1,4 @@
+#visualization.py
 from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
@@ -30,10 +31,6 @@ class Visualizer:
         self.text_color: Color = (255, 255, 255)
 
     def _get_scale_params(self, frame: np.ndarray) -> dict:
-        """
-        Compute scaling parameters based on frame height.
-        Returns a dict with thickness, font_scale, text_thickness, and scale.
-        """
         frame_height = frame.shape[0]
         scale = frame_height / 720.0
         thickness = max(2, int(2 * scale))
@@ -58,19 +55,6 @@ class Visualizer:
         worker_states: List[Dict[str, Any]],
         alerts: List[Dict[str, Any]],
     ) -> np.ndarray:
-        """
-        Create an annotated copy of the input frame.
-
-        Args:
-            frame: Original BGR OpenCV frame.
-            detections: Structured detection results from detector.py
-            matched_results: Per-person PPE match results from matcher.py
-            worker_states: Rule-engine outputs from rules.py
-            alerts: Human-readable alerts from alerts.py
-
-        Returns:
-            Annotated BGR frame.
-        """
         annotated = frame.copy()
 
         state_by_track_id = {
@@ -109,11 +93,8 @@ class Visualizer:
             if track_id is not None:
                 label = f"ID {track_id} | {label}"
 
-            # Make negative PPE detections red
             if class_name_lower in self.NEGATIVE_PPE_CLASSES:
                 color = self.unsafe_color
-
-            # Keep tracked person box colored by worker state
             elif class_name_lower == "person" and track_id is not None:
                 worker = state_by_track_id.get(int(track_id))
                 if worker is not None:
@@ -150,11 +131,23 @@ class Visualizer:
             state = str(worker.get("state", "uncertain"))
             notes = list(worker.get("notes", []))
             uncertain_reasons = list(worker.get("uncertain_reasons", []))
+            unsafe_duration = float(worker.get("unsafe_duration", 0.0))
+            uncertain_duration = float(worker.get("uncertain_duration", 0.0))
+            risk_level = str(worker.get("risk_level", "low"))
+            risk_score = int(worker.get("risk_score", 0))
             color = self._get_state_color(state)
 
             x1, y1, _, _ = [int(v) for v in person_bbox]
 
-            state_text = f"Worker {track_id}: {state.upper()}"
+            state_text = self._build_state_text(
+                track_id=track_id,
+                state=state,
+                unsafe_duration=unsafe_duration,
+                uncertain_duration=uncertain_duration,
+                risk_level=risk_level,
+                risk_score=risk_score,
+            )
+
             self._draw_text(
                 frame,
                 state_text,
@@ -201,6 +194,26 @@ class Visualizer:
                 thickness=scale_params["text_thickness"],
             )
             y_offset += int(30 * scale_params["scale"])
+
+    def _build_state_text(
+        self,
+        track_id: int,
+        state: str,
+        unsafe_duration: float,
+        uncertain_duration: float,
+        risk_level: str,
+        risk_score: int,
+    ) -> str:
+        state_upper = state.upper()
+        risk_upper = risk_level.upper()
+
+        if state.lower() == "unsafe":
+            return f"ID {track_id} | {state_upper} {unsafe_duration:.1f}s | {risk_upper} ({risk_score})"
+
+        if state.lower() == "uncertain":
+            return f"ID {track_id} | {state_upper} {uncertain_duration:.1f}s | {risk_upper} ({risk_score})"
+
+        return f"ID {track_id} | {state_upper} | {risk_upper} ({risk_score})"
 
     def _build_detail_text(
         self,

@@ -71,6 +71,115 @@ def make_json_safe(value: Any) -> Any:
     return value
 
 
+def build_incident_snapshot_dir(output_dir: Path) -> Path:
+    incident_dir = output_dir / "incidents"
+    incident_dir.mkdir(parents=True, exist_ok=True)
+
+    # Subfolders for cleaner organization
+    (incident_dir / "full_frames").mkdir(parents=True, exist_ok=True)
+    (incident_dir / "worker_crops").mkdir(parents=True, exist_ok=True)
+
+    return incident_dir
+
+
+def _safe_int_bbox(bbox: Any, frame_width: int, frame_height: int) -> Optional[tuple[int, int, int, int]]:
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+        return None
+
+    try:
+        x1, y1, x2, y2 = [int(float(v)) for v in bbox]
+    except (TypeError, ValueError):
+        return None
+
+    x1 = max(0, min(x1, frame_width - 1))
+    y1 = max(0, min(y1, frame_height - 1))
+    x2 = max(0, min(x2, frame_width))
+    y2 = max(0, min(y2, frame_height))
+
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    return x1, y1, x2, y2
+
+
+def save_incident_snapshots(
+    frame,
+    frame_index: int,
+    worker_states: List[Dict[str, Any]],
+    matched_results: List[Dict[str, Any]],
+    incident_dir: Path,
+    saved_incident_keys: set[tuple[int, str]],
+) -> None:
+    """
+    Save one full-frame snapshot and one worker crop per worker per unsafe episode.
+
+    A new snapshot is saved only when a worker newly enters an unsafe episode.
+    If the worker later returns to a non-unsafe state and becomes unsafe again,
+    a new snapshot can be saved.
+    """
+    unsafe_track_ids_in_frame = set()
+
+    # Map worker track_id -> person_bbox from matcher output
+    bbox_by_track_id: Dict[int, Any] = {}
+    for match in matched_results:
+        track_id = match.get("track_id")
+        person_bbox = match.get("person_bbox")
+        if track_id is None or person_bbox is None:
+            continue
+
+        try:
+            bbox_by_track_id[int(track_id)] = person_bbox
+        except (TypeError, ValueError):
+            continue
+
+    frame_height, frame_width = frame.shape[:2]
+    full_frame_dir = incident_dir / "full_frames"
+    crop_dir = incident_dir / "worker_crops"
+
+    for worker in worker_states:
+        track_id = worker.get("track_id")
+        state = str(worker.get("state", "")).lower()
+
+        if track_id is None:
+            continue
+
+        track_id = int(track_id)
+
+        if state == "unsafe":
+            unsafe_track_ids_in_frame.add(track_id)
+
+            incident_key = (track_id, "unsafe")
+            if incident_key in saved_incident_keys:
+                continue
+
+            timestamp_stub = f"worker_{track_id}_frame_{frame_index}"
+
+            # Save full frame
+            full_frame_path = full_frame_dir / f"{timestamp_stub}.jpg"
+            cv2.imwrite(str(full_frame_path), frame)
+
+            # Save cropped worker if bbox available
+            person_bbox = bbox_by_track_id.get(track_id)
+            int_bbox = _safe_int_bbox(person_bbox, frame_width, frame_height)
+            if int_bbox is not None:
+                x1, y1, x2, y2 = int_bbox
+                worker_crop = frame[y1:y2, x1:x2]
+                if worker_crop.size > 0:
+                    crop_path = crop_dir / f"{timestamp_stub}_crop.jpg"
+                    cv2.imwrite(str(crop_path), worker_crop)
+
+            saved_incident_keys.add(incident_key)
+
+    keys_to_remove = []
+    for incident_key in saved_incident_keys:
+        track_id, state_tag = incident_key
+        if state_tag == "unsafe" and track_id not in unsafe_track_ids_in_frame:
+            keys_to_remove.append(incident_key)
+
+    for key in keys_to_remove:
+        saved_incident_keys.remove(key)
+
+
 # ----------------------------
 # Config / pipeline helpers
 # ----------------------------
@@ -236,6 +345,8 @@ def process_video(
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
 
     ensure_dir(output_dir)
+    incident_dir = build_incident_snapshot_dir(output_dir)
+    saved_incident_keys: set[tuple[int, str]] = set()
 
     output_video_path = build_output_path(
         output_dir=output_dir,
@@ -304,6 +415,15 @@ def process_video(
             matched_results = matcher.match(detections)
             worker_states = rules_engine.evaluate_frame(matched_results, fps=fps)
             alerts = alert_generator.generate(worker_states)
+
+            save_incident_snapshots(
+                frame=frame,
+                frame_index=frame_index,
+                worker_states=worker_states,
+                matched_results=matched_results,
+                incident_dir=incident_dir,
+                saved_incident_keys=saved_incident_keys,
+            )
 
             annotated = visualizer.annotate_frame(
                 frame=frame,
@@ -422,6 +542,7 @@ def process_video(
         print("Inference JSON        : Not saved (disabled in config)")
     print(f"Review JSON           : {output_review_path}")
     print(f"Analytics JSON        : {output_analytics_path}")
+    print(f"Incident snapshots    : {incident_dir}")
     print_separator()
 
 

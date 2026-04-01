@@ -1,3 +1,4 @@
+# Bytetrack.yaml tracker configuration file
 tracker_type: bytetrack
 track_high_thresh: 0.5
 track_low_thresh: 0.1
